@@ -9,7 +9,7 @@ from datetime import date
 from ..config import load_env
 from ..net import fetch
 
-LIST = "https://www.jisilu.cn/data/qdii/qdii_list/{market}?___jsl=LST___t={ts}&only_etf=y&rp=22"
+LIST = "https://www.jisilu.cn/data/qdii/qdii_list/{market}?___jsl=LST___t={ts}&{only}=y&rp=22"
 HIST = "https://www.jisilu.cn/data/qdii/detail_hists/?___jsl=LST___t={ts}"
 
 
@@ -25,8 +25,13 @@ def _headers() -> dict[str, str]:
     }
 
 
-def download_list(market: str = "E") -> bytes:
-    return fetch(LIST.format(market=market, ts=int(time.time() * 1000)), headers=_headers())
+def download_list(market: str = "E", only: str = "only_etf") -> bytes:
+    """QDII 列表当前快照。market：E 欧美、A 亚洲、C 商品；only：only_etf 或 only_lof。"""
+    return fetch(LIST.format(market=market, ts=int(time.time() * 1000), only=only), headers=_headers())
+
+
+def parse_list(raw: bytes) -> dict[str, dict]:
+    return {r["id"]: r["cell"] for r in json.loads(raw).get("rows", [])}
 
 
 def download_hist(fund_id: str) -> bytes:

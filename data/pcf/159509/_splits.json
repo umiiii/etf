@@ -1,0 +1,38 @@
+[
+ {
+  "code": "KLAC",
+  "date": "2026-06-15",
+  "prev": "2026-06-11",
+  "factor": 12.5,
+  "status": "rejected"
+ },
+ {
+  "code": "KLAC",
+  "date": "2026-06-15",
+  "prev": "2026-06-11",
+  "qty_ratio": 12.0,
+  "factor": 12.0,
+  "status": "unverified"
+ },
+ {
+  "code": "ARM",
+  "date": "2026-06-23",
+  "prev": "2026-06-22",
+  "factor": 3.0,
+  "status": "rejected"
+ },
+ {
+  "code": "TRI",
+  "date": "2026-06-23",
+  "prev": "2026-06-22",
+  "factor": 0.6666666666666666,
+  "status": "rejected"
+ },
+ {
+  "code": "CRWD",
+  "date": "2026-07-03",
+  "prev": "2026-07-01",
+  "factor": 3.75,
+  "status": "rejected"
+ }
+]

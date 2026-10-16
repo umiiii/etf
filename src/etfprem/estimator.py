@@ -23,7 +23,7 @@ from bisect import bisect_right
 from .config import LOCAL_MARKETS as CN_MARKETS
 from .store import MarketData
 
-LOCAL_MARKETS = ("深圳市场", "上海市场")
+LOCAL_MARKETS = ("深圳市场", "上海市场", "香港市场")  # 清单里不计入美股篓子的挂牌市场
 
 
 @dataclass(frozen=True)
@@ -118,14 +118,24 @@ class PcfEstimator:
                 continue
             k = 1.0
             series = self.md.px.get(code, {})
-            if priced_us in series and fx:
+            if h.sub_amount > 0 and priced_us in series and fx:
                 implied = h.sub_amount / (h.qty * (1 + h.sub_margin) * fx)
                 k = snap_split(implied / series[priced_us])
                 if k != 1.0 and Fraction(k).limit_denominator(20) != Fraction(k):
                     self.notes.append(f"{T} {code} 清单价格与行情不符，比例 {k:.4f}")
+            else:
+                k = self.split_factor(code, T)  # 清单没有替代金额：用核对过的拆股记录
             out[code] = h.qty * k
         self._hold[T] = out
         return out
+
+    def split_factor(self, code: str, T: date) -> float:
+        """清单 T 的原始股数换算到复权口径的倍数：T 之后才改用新股数的拆股都要乘上。"""
+        k = 1.0
+        for d, f in self.md.splits.get(code, ()):
+            if T < d:
+                k *= f
+        return k
 
     def _previous_qty(self, code: str, T: date) -> float | None:
         d = self.cal.prev_cn(T)
@@ -185,13 +195,14 @@ class PcfEstimator:
     # ------------------------------------------------------------ 敞口与估值
 
     def exposure(self, D: date, method: str = "basket") -> tuple[float, int]:
-        """用 D 之前（含 Dp）的官方净值回归真实敞口。"""
+        """用 D 之前（含 Dp）的官方净值回归真实敞口。上市前的净值日不用：建仓期基金大部分还是现金。"""
         nav = self.md.nav
+        listed = min(self.md.etf) if self.md.etf else None
         xs: list[float] = []
         ys: list[float] = []
         k = self.cal.prev_cn(D)
         for _ in range(self.p.max_lookback):
-            if k is None or len(xs) >= self.p.window:
+            if k is None or len(xs) >= self.p.window or (listed and k < listed):
                 break
             st = self.step(k)
             if st and k in nav and st.Dp in nav:
@@ -208,10 +219,19 @@ class PcfEstimator:
         return sum(x * y for x, y in zip(xs, ys)) / sum(x * x for x in xs), len(xs)
 
     def estimate(self, D: date, method: str = "basket", nav_prev: float | None = None) -> NavEstimate | None:
+        return self._estimate(D, method, nav_prev)
+
+    def _estimate(self, D: date, method: str, nav_prev: float | None = None, depth: int = 0) -> NavEstimate | None:
         st = self.step(D)
         if st is None:
             return None
         nav_prev = nav_prev if nav_prev is not None else self.md.nav.get(st.Dp)
+        if nav_prev is None and depth < 5:
+            # 境外休市时部分基金不公布当天净值：用前一天的估算值接续，锚点退回最近一个公布净值
+            prev = self._estimate(st.Dp, method, depth=depth + 1)
+            if prev is not None:
+                nav_prev = prev.nav
+                self.notes.append(f"{st.Dp} 基金没有公布净值，{D} 的估算从更早的公布净值接续")
         r = st.r_basket if method == "basket" else st.r_index
         if nav_prev is None or r is None:
             return None
@@ -233,6 +253,98 @@ class PcfEstimator:
 
 
 Estimator = PcfEstimator  # 兼容旧名
+
+
+def _easter(y: int) -> date:
+    """公历复活节（Meeus/Jones/Butcher 算法）。"""
+    a, (b, c) = y % 19, divmod(y, 100)
+    d, e = divmod(b, 4)
+    g = (b - (b + 8) // 25 + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    l_ = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l_) // 451
+    month, day = divmod(h + l_ - 7 * m + 114, 31)
+    return date(y, month, day + 1)
+
+
+def _western_holiday(d: date) -> bool:
+    """港股与伦敦同时放假的日子：圣诞、节礼日、耶稣受难日、复活节星期一。"""
+    e = _easter(d.year)
+    return (d.month, d.day) in ((12, 25), (12, 26)) or d in (e - timedelta(days=2), e + timedelta(days=1))
+
+
+class IndexEstimator(PcfEstimator):
+    """只用一条日线：跟踪指数，或联接基金持有的那只境外 ETF。
+
+        r      = 日线从 Dp 到 D 的涨跌，两端各取本市场在该日或之前的最近收盘
+        E      = 过去 N 个净值日“去汇率、去费用的净值收益”对 r 的过原点回归斜率
+        estNAV = NAV(Dp) · (1 + E·r) · FX(D)/FX(Dp) − 费用
+
+    与集思录的估值公式相同，只是多了回归出的敞口 E。人民币计价的指数不做汇率换算。
+    """
+
+    def __init__(self, md: MarketData, params: Params | None = None):
+        super().__init__(md, params)
+        self.series = md.fund.index_series
+        self._idx_keys = sorted(md.index)
+
+    def _fx(self, d: date) -> float | None:
+        if self.series.currency == "CNY":
+            return 1.0
+        return self.md.fx.get(d)
+
+    def _level(self, s: date | None) -> float | None:
+        return self.md.index.get(s) if s else None
+
+    def proxy_day(self, D: date) -> date | None:
+        """净值日 D 实际用到的日线日期。
+
+        一般就是 D 当天或之前最近的一个收盘。香港 ETF 的净值要到下一个港股交易日才公布，基金在 T 日晚上算
+        NAV(D) 时只能用 T 日及之前已公布的那些：碰上港股假期，D 当天的净值要晚几天才进入基金净值。
+        """
+        days = self.md.published_days
+        s = self.cal.us_on_or_before(D)
+        if not days or s is None:
+            return s
+        T = self.cal.next_cn(D) or D + timedelta(days=1)
+        western = self.series.published_rule == "western"
+        while s is not None:
+            i = bisect_right(days, s)
+            published = days[i] if i < len(days) else s + timedelta(days=1)  # 日历之外按下一天公布
+            if published <= T or (western and not any(_western_holiday(s + timedelta(days=n))
+                                                       for n in range(1, (published - s).days))):
+                return s
+            s = self.cal.us_on_or_before(s - timedelta(days=1))
+        return None
+
+    def step(self, D: date) -> Step | None:
+        if D in self._steps:
+            return self._steps[D]
+        result = None
+        Dp = self.cal.prev_cn(D)
+        if Dp:
+            s0, s1 = self.proxy_day(Dp), self.proxy_day(D)
+            v0, v1 = self._level(s0), self._level(s1)
+            fx0, fx1 = self._fx(Dp), self._fx(D)
+            if v0 and v1 and fx0 and fx1:
+                result = Step(D, Dp, s1, s0, s1, fx0, fx1, v1 / v0 - 1, None, None, 1)
+        self._steps[D] = result
+        return result
+
+    def estimate(self, D: date, method: str = "basket", nav_prev: float | None = None) -> NavEstimate | None:
+        if method != "basket":
+            return None  # 唯一的方法就是这条日线，没有单独的对照
+        return self._estimate(D, "basket", nav_prev)
+
+    def fair_value(self, T: date, est: NavEstimate) -> tuple[float, int]:
+        """T 日开盘时的公允价值：补上 D 之后、T 之前的境外交易日（长假后），汇率换成 FX(T)。"""
+        st = est.step
+        latest = self.cal.us_on_or_before(T - timedelta(days=1))
+        gap = self.cal.us_between(st.s1, latest) if latest else []
+        r_gap = self._level(latest) / self._level(st.s1) - 1 if gap and self._level(st.s1) else 0.0
+        fx_t = self._fx(T) or st.fx1
+        return est.nav * (1 + est.exposure * r_gap) * fx_t / st.fx1, len(gap)
 
 
 def _solve2(a11: float, a12: float, a22: float, b1: float, b2: float) -> tuple[float, float] | None:
@@ -410,4 +522,6 @@ class ReportEstimator:
 def make_estimator(md: MarketData, params: Params | None = None):
     if md.fund.holdings == "reports":
         return ReportEstimator(md, params)
+    if md.fund.holdings == "index":
+        return IndexEstimator(md, params)
     return PcfEstimator(md, params)

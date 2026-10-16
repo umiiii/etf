@@ -1,0 +1,178 @@
+[
+ {
+  "code": "REX",
+  "date": "2025-09-17",
+  "prev": "2025-09-15",
+  "qty_ratio": 2.0,
+  "factor": 2.0,
+  "status": "confirmed"
+ },
+ {
+  "code": "CRGY",
+  "date": "2025-09-23",
+  "prev": "2025-09-22",
+  "qty_ratio": 1.5,
+  "factor": 1.5,
+  "status": "rejected"
+ },
+ {
+  "code": "DINO",
+  "date": "2025-09-23",
+  "prev": "2025-09-22",
+  "qty_ratio": 0.6666666666666666,
+  "factor": 0.6666666666666666,
+  "status": "rejected"
+ },
+ {
+  "code": "GPOR",
+  "date": "2025-09-23",
+  "prev": "2025-09-22",
+  "qty_ratio": 1.5,
+  "factor": 1.5,
+  "status": "rejected"
+ },
+ {
+  "code": "KOS",
+  "date": "2025-09-23",
+  "prev": "2025-09-22",
+  "qty_ratio": 1.5,
+  "factor": 1.5,
+  "status": "rejected"
+ },
+ {
+  "code": "TALO",
+  "date": "2025-09-23",
+  "prev": "2025-09-22",
+  "qty_ratio": 1.5,
+  "factor": 1.5,
+  "status": "rejected"
+ },
+ {
+  "code": "VG",
+  "date": "2025-09-23",
+  "prev": "2025-09-22",
+  "qty_ratio": 5.0,
+  "factor": 5.0,
+  "status": "rejected"
+ },
+ {
+  "code": "TPL",
+  "date": "2025-12-24",
+  "prev": "2025-12-22",
+  "qty_ratio": 3.0,
+  "factor": 3.0,
+  "status": "confirmed"
+ },
+ {
+  "code": "BKV",
+  "date": "2026-03-24",
+  "prev": "2026-03-23",
+  "qty_ratio": 1.5,
+  "factor": 1.5,
+  "status": "rejected"
+ },
+ {
+  "code": "CLMT",
+  "date": "2026-03-24",
+  "prev": "2026-03-23",
+  "qty_ratio": 1.5,
+  "factor": 1.5,
+  "status": "rejected"
+ },
+ {
+  "code": "SD",
+  "date": "2026-03-24",
+  "prev": "2026-03-23",
+  "qty_ratio": 1.5,
+  "factor": 1.5,
+  "status": "rejected"
+ },
+ {
+  "code": "TALO",
+  "date": "2026-03-24",
+  "prev": "2026-03-23",
+  "qty_ratio": 1.5,
+  "factor": 1.5,
+  "status": "rejected"
+ },
+ {
+  "code": "TPL",
+  "date": "2026-03-24",
+  "prev": "2026-03-23",
+  "qty_ratio": 0.6666666666666666,
+  "factor": 0.6666666666666666,
+  "status": "rejected"
+ },
+ {
+  "code": "EGY",
+  "date": "2026-06-23",
+  "prev": "2026-06-22",
+  "qty_ratio": 2.0,
+  "factor": 2.0,
+  "status": "rejected"
+ },
+ {
+  "code": "GEVO",
+  "date": "2026-06-23",
+  "prev": "2026-06-22",
+  "qty_ratio": 2.0,
+  "factor": 2.0,
+  "status": "rejected"
+ },
+ {
+  "code": "SOC",
+  "date": "2026-06-23",
+  "prev": "2026-06-22",
+  "qty_ratio": 2.5,
+  "factor": 2.5,
+  "status": "rejected"
+ },
+ {
+  "code": "WKC",
+  "date": "2026-06-23",
+  "prev": "2026-06-22",
+  "qty_ratio": 0.6666666666666666,
+  "factor": 0.6666666666666666,
+  "status": "rejected"
+ },
+ {
+  "code": "CLMT",
+  "date": "2026-09-22",
+  "prev": "2026-09-21",
+  "qty_ratio": 0.6666666666666666,
+  "factor": 0.6666666666666666,
+  "status": "rejected"
+ },
+ {
+  "code": "EGY",
+  "date": "2026-09-22",
+  "prev": "2026-09-21",
+  "qty_ratio": 0.6666666666666666,
+  "factor": 0.6666666666666666,
+  "status": "rejected"
+ },
+ {
+  "code": "NUAI",
+  "date": "2026-09-22",
+  "prev": "2026-09-21",
+  "qty_ratio": 0.6666666666666666,
+  "factor": 0.6666666666666666,
+  "status": "rejected"
+ },
+ {
+  "code": "PBF",
+  "date": "2026-09-22",
+  "prev": "2026-09-21",
+  "qty_ratio": 0.6666666666666666,
+  "factor": 0.6666666666666666,
+  "status": "rejected"
+ },
+ {
+  "code": "SD",
+  "date": "2026-09-22",
+  "prev": "2026-09-21",
+  "qty_ratio": 0.6666666666666666,
+  "factor": 0.6666666666666666,
+  "status": "rejected"
+ }
+]

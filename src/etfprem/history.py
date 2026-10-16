@@ -34,6 +34,7 @@ class Row:
     premium_fv: float  # 收盘价 / 公允价值 − 1
     jisilu_premium: float | None  # 集思录历史表 discount_rt
     jisilu_price: float | None = None  # 集思录历史表 price
+    jisilu_nav_date: date | None = None  # 集思录这一行用的净值日期（净值发布延迟时会比 nav_date 早）
 
     @property
     def nav_err_bp(self) -> float | None:
@@ -70,7 +71,7 @@ def compute(md: MarketData, start: date, end: date, est=None) -> list[Row]:
         nav4 = md.nav4.get(D)
         fv, gap = est.fair_value(T, b)
         jrow = md.jisilu.get(T, {})
-        js, jprice = jrow.get("discount_rt"), jrow.get("price")
+        js, jprice, jnd = jrow.get("discount_rt"), jrow.get("price"), jrow.get("net_value_dt")
         rows.append(
             Row(
                 date=T,
@@ -93,6 +94,7 @@ def compute(md: MarketData, start: date, end: date, est=None) -> list[Row]:
                 premium_fv=close / fv - 1,
                 jisilu_premium=float(js) / 100 if js not in (None, "-", "") else None,
                 jisilu_price=float(jprice) if jprice not in (None, "-", "") else None,
+                jisilu_nav_date=date.fromisoformat(jnd) if jnd else None,
             )
         )
     return rows
@@ -116,7 +118,9 @@ def summarize(rows: list[Row]) -> dict:
     nav_err = [r.nav_err_bp for r in done]
     nav_err_idx = [r.nav_err_index_bp for r in done if r.nav_err_index_bp is not None]
     prem_err = [r.premium_err_pp for r in done if r.premium_err_pp is not None]
-    js = [r for r in rows if r.jisilu_premium is not None]
+    js_all = [r for r in rows if r.jisilu_premium is not None]
+    # 集思录在净值发布延迟时沿用更早的净值，这些日子口径不同，单独列出，不参与比较
+    js = [r for r in js_all if r.jisilu_nav_date in (None, r.nav_date)]
     prem = [r.premium_official if r.premium_official is not None else r.premium_est for r in rows]
 
     monthly = defaultdict(list)
@@ -146,6 +150,7 @@ def summarize(rows: list[Row]) -> dict:
         "jisilu_beyond_rounding": [r.date for r in js if r.premium_official is not None
                                    and abs(r.premium_official - r.jisilu_premium) * 100 > 0.006],
         "jisilu_price_mismatch": [r.date for r in js if r.jisilu_price is not None and abs(r.jisilu_price - r.close) > 1e-9],
+        "jisilu_other_nav_date": [(r.date, r.jisilu_nav_date, r.nav_date) for r in js_all if r not in js],
         "premium": {
             "mean": st.mean(prem),
             "median": st.median(prem),

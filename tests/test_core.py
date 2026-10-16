@@ -108,6 +108,176 @@ class TestHistory(unittest.TestCase):
             self.assertLess(abs(q2 / q0 - 1), 0.3, f"{code} 拆股后复权股数应与拆股前接近")
 
 
+# ---------------------------------------------------------------- 指数法：跟踪指数或被投资 ETF 的日线
+
+from etfprem.estimator import IndexEstimator  # noqa: E402
+
+NDX_FUND = get_fund("513100")
+HAS_NDX = (DATA / "index" / "NDX.json").exists() and (DATA / "nav" / "513100_eastmoney.json").exists()
+
+
+@unittest.skipUnless(HAS_NDX, "缺少 513100 的缓存，先运行 etfprem update --fund 513100")
+class TestIndexMethod(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.md = store.load(NDX_FUND)
+        cls.rows = history.compute(cls.md, date(2025, 10, 15), date(2026, 10, 15))
+        cls.summary = history.summarize(cls.rows)
+
+    def test_accuracy(self):
+        nav = self.summary["nav_err_bp"]
+        self.assertLess(nav["mae"], 1.5)
+        self.assertLess(nav["max"], 10)
+
+    def test_official_premium_matches_jisilu(self):
+        self.assertGreater(self.summary["jisilu_days"], 40)
+        self.assertLess(self.summary["jisilu_vs_official_pp"]["max"], 0.006)
+
+    def test_no_lookahead(self):
+        """删掉 T 日开盘后才知道的数据，估算结果必须完全相同。"""
+        md, full = self.md, IndexEstimator(self.md)
+        for D in (date(2025, 12, 22), date(2026, 5, 6), date(2026, 9, 30), date(2026, 10, 9)):
+            st = full.step(D)
+            T = full.cal.next_cn(D)
+            cut = replace(
+                md,
+                nav={k: v for k, v in md.nav.items() if k <= st.Dp},
+                nav4={k: v for k, v in md.nav4.items() if k <= st.Dp},
+                etf={k: v for k, v in md.etf.items() if k <= T},
+                fx={k: v for k, v in md.fx.items() if k <= T},
+                index={k: v for k, v in md.index.items() if k <= st.s1},
+                jisilu={},
+            )
+            a, b = full.estimate(D), IndexEstimator(cut).estimate(D)
+            self.assertEqual(a.nav, b.nav, D)
+            self.assertEqual(a.exposure, b.exposure, D)
+
+    def test_holiday_gap(self):
+        """国庆后首个交易日，参考净值日之后美股又交易了 5 天，公允价值要把这几天补上。"""
+        row = next(r for r in self.rows if r.date == date(2026, 10, 8))
+        self.assertEqual(row.nav_date, date(2026, 9, 30))
+        self.assertEqual(row.gap_sessions, 5)
+        self.assertNotAlmostEqual(row.fair_value, row.nav_est, places=3)
+
+
+class TestSourceParsers(unittest.TestCase):
+    """新数据源的解析与取价规则（不联网）。"""
+
+    def test_b3_parse(self):
+        import io
+        import zipfile
+
+        from etfprem.sources import b3
+
+        chars = [" "] * 245
+        for start, text in ((0, "01"), (2, "20261015"), (12, "BOVB11".ljust(12)), (24, "010"),
+                            (108, "0000000016404"), (147, "00229"), (210, "0000001")):  # 记录类型、日期、代码、市场、收盘、笔数、报价因子
+            chars[start:start + len(text)] = text
+        line = "".join(chars)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("COTAHIST.TXT", line + "\n")
+        self.assertEqual(b3.parse(buf.getvalue(), {"BOVB11"}), {"BOVB11": {date(2026, 10, 15): 164.04}})
+
+    def test_bcb_rules(self):
+        from etfprem.sources import bcb
+
+        day = [("10:07:20", 5.38), ("11:07:19", 5.36), ("12:07:18", 5.37), ("13:07:22", 5.39)]
+        self.assertEqual(bcb.rate_at(day, "11:00"), 5.36)
+        self.assertIsNone(bcb.rate_at(day[:1], "13:00"))  # 半日市取不到 13 点
+        self.assertEqual(bcb.london_4pm_brt(date(2026, 7, 1)), "12:00")  # 英国夏令时
+        self.assertEqual(bcb.london_4pm_brt(date(2026, 1, 15)), "13:00")
+
+    def test_fx_pair_names(self):
+        from etfprem.config import pair_currency
+
+        self.assertEqual(pair_currency("USD/CNY@16"), ("USD", 1.0))
+        self.assertEqual(pair_currency("BRL/CNY@BJ22"), ("BRL", 1.0))
+        self.assertEqual(pair_currency("100JPY/CNY"), ("JPY", 100.0))
+        self.assertEqual(store._fx_path("USD/CNY@16").name, "USD_CNY_16h.json")
+        self.assertEqual(store._fx_path("BRL/CNY@LDN16").name, "BRL_CNY_LDN16.json")
+
+
+ALL_FUNDS_OK = all((DATA / "nav" / f"{f}_eastmoney.json").exists() for f in ("513300", "159329", "159822", "159687"))
+
+
+@unittest.skipUnless(ALL_FUNDS_OK, "缺少缓存，先运行 etfprem update --fund all")
+class TestFundConventions(unittest.TestCase):
+    """批量扩展时查出来的各基金估值口径。"""
+
+    @staticmethod
+    def _summary(fund_id: str) -> dict:
+        md = store.load(get_fund(fund_id))
+        return history.summarize(history.compute(md, date(2025, 10, 15), date(2026, 10, 15)))
+
+    def test_huaxia_uses_4pm_reference_rate(self):
+        """华夏用外汇交易中心 16:00 参考汇率，换回中间价误差会大十倍。"""
+        self.assertLess(self._summary("513300")["nav_err_bp"]["mae"], 1.0)
+        fund = replace(get_fund("513300"), fx_pairs=("USD/CNY",))
+        md = store.load(fund)
+        mae = history.summarize(history.compute(md, date(2025, 10, 15), date(2026, 10, 15)))["nav_err_bp"]["mae"]
+        self.assertGreater(mae, 5)
+
+    def test_feeder_uses_underlying_nav(self):
+        """联接基金按被投资 ETF 的净值估值。"""
+        self.assertLess(self._summary("159687")["nav_err_bp"]["mae"], 1.0)
+        self.assertLess(self._summary("159329")["nav_err_bp"]["mae"], 1.0)
+
+    def test_saudi_hk_holiday_lag(self):
+        """2830 的净值下一个港股交易日才公布：重阳节前一天的涨跌进入 159329 第二天的净值。"""
+        md = store.load(get_fund("159329"))
+        est = IndexEstimator(md)
+        self.assertEqual(est.proxy_day(date(2025, 10, 28)), date(2025, 10, 27))
+        self.assertEqual(est.proxy_day(date(2025, 10, 29)), date(2025, 10, 28))
+        self.assertEqual(est.proxy_day(date(2025, 10, 30)), date(2025, 10, 30))
+
+    def test_missing_nav_days_are_chained(self):
+        """159822 在美国、香港休市日不公布净值，后一天的估算从更早的公布净值接续，不缺行。"""
+        s = self._summary("159822")
+        self.assertEqual(s["days"], 243)
+        self.assertLess(s["days_with_official"], s["days"])
+
+
+class TestSplitCandidates(unittest.TestCase):
+    """没有申购替代金额的清单，靠前后股数的整数比找拆股；小股数的取整跳变不算。"""
+
+    def _pcf(self, d: date, qty: dict[str, int]) -> szse_pcf.PCF:
+        holdings = {c: szse_pcf.Holding(c, q, "允许", 0.1, 0.0, "其他市场") for c, q in qty.items()}
+        return szse_pcf.PCF("159518", d, None, None, None, None, None, 1_000_000, None, holdings)
+
+    def test_candidates(self):
+        days = [date(2026, 6, d) for d in (10, 11, 12, 15, 16)]
+        qty = [
+            {"APA": 115, "AR": 132, "TINY": 1, "REV": 40},
+            {"APA": 116, "AR": 132, "TINY": 2, "REV": 40},  # TINY 1→2 是取整
+            {"APA": 0, "AR": 132, "TINY": 2, "REV": 40},  # 拆股当天写成 0 股
+            {"APA": 464, "AR": 133, "TINY": 2, "REV": 4},  # APA 1 拆 4，REV 10 合 1
+            {"APA": 465, "AR": 133, "TINY": 2, "REV": 4},
+        ]
+        pcfs = {d: self._pcf(d, q) for d, q in zip(days, qty)}
+        got = {(c, T, k) for c, _, T, k in store.split_candidates(pcfs)}
+        self.assertEqual(got, {("APA", date(2026, 6, 15), 4.0), ("REV", date(2026, 6, 15), 0.1)})
+
+    def test_rebalance_days(self):
+        """超过三成成分股的股数同时变化的那天是调仓日，核对不了的拆股候选在这天按调仓处理。"""
+        days = [date(2025, 12, d) for d in (19, 22, 23)]
+        qty = [
+            {"A": 100, "B": 50, "C": 30, "RNA": 60},
+            {"A": 100, "B": 50, "C": 30, "RNA": 60},
+            {"A": 140, "B": 35, "C": 30, "RNA": 31},  # 调仓：A、B 和 RNA 都变了
+        ]
+        pcfs = {d: self._pcf(d, q) for d, q in zip(days, qty)}
+        self.assertEqual(store.rebalance_days(pcfs), {date(2025, 12, 23)})
+
+    def test_ratio(self):
+        self.assertEqual(store._is_split_ratio(4.003), 4.0)
+        self.assertEqual(store._is_split_ratio(0.1001), 0.1)
+        self.assertEqual(store._is_split_ratio(10.25), 10.0)  # NFLX 1 拆 10 与调仓同日，股数比 10.25
+        self.assertEqual(store._is_split_ratio(1.5), 1.5)
+        self.assertIsNone(store._is_split_ratio(1.2))
+        self.assertIsNone(store._is_split_ratio(2.3))
+
+
 if __name__ == "__main__":
     unittest.main()
 

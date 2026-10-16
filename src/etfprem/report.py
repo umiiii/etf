@@ -19,8 +19,69 @@ def _f(x: float | None, nd: int) -> str:
     return "" if x is None else f"{x:.{nd}f}"
 
 
+FEEDER_SOURCES = ("csop", "lionglobal", "b3")  # 这些数据源给的是被投资 ETF 的净值或收盘价，不是指数
+
+
+def is_feeder(fund: FundConfig) -> bool:
+    """联接基金：持仓只有一只境外上市的 ETF，用它的收盘价估值。"""
+    sr = fund.index_series
+    return fund.holdings == "index" and sr is not None and (sr.source in FEEDER_SOURCES or sr.symbol.startswith("hk"))
+
+
+def method_label(fund: FundConfig) -> str:
+    """主估算方法的简称。"""
+    if fund.holdings == "index":
+        return "持仓ETF法" if is_feeder(fund) else "指数法"
+    return "篓子法"
+
+
+def _ccy_name(ccy: str) -> str:
+    return {"USD": "美元", "EUR": "欧元", "HKD": "港元", "BRL": "雷亚尔", "CNY": "人民币", "SGD": "新加坡元",
+            "SAR": "沙特里亚尔"}.get(ccy, ccy)
+
+
 def method_lines(fund: FundConfig) -> list[str]:
     fee = f"{fund.annual_fee:.2%}"
+    if fund.holdings == "index":
+        sr = fund.index_series
+        ccy = _ccy_name(sr.currency)
+        if is_feeder(fund) and sr.source == "b3":
+            first = (f"基金是联接型 ETF，持仓只有一只巴西上市的 ETF：{sr.name}。基金合同规定按它在 B3 的收盘价估值，"
+                     "所以用 B3 官方行情文件里的收盘价从 Dp 到 D 的涨跌代表持仓涨跌。")
+        elif is_feeder(fund):
+            first = (f"基金是联接型 ETF，持仓只有一只境外 ETF。基金合同规定按被投资 ETF 的份额净值估值，"
+                     f"所以用{sr.name}从 Dp 到 D 的涨跌代表持仓涨跌；它不估值的日子沿用最近一日的净值。"
+                     "被投资 ETF 在场内几乎没有成交，用收盘价误差会大几十倍。")
+        elif sr.source == "nasdaq_etf":
+            first = (f"跟踪的标普行业指数没有免费日线，用跟踪同一指数的美国 ETF：{sr.name}的收盘价代替，"
+                     "两端各取在该日或之前最近的收盘。")
+        else:
+            first = f"用跟踪指数{sr.name}从 Dp 到 D 的涨跌代表持仓涨跌，两端各取指数在该日或之前最近的收盘。"
+        if sr.published:
+            first += "被投资 ETF 的净值要到下一个港股交易日才公布，碰上港股假期，基金当天的净值用不到它，要顺延到之后的净值日。"
+        fx = ("指数以人民币计价，不做汇率换算。" if sr.currency == "CNY"
+              else f"汇率用外汇交易中心{ccy}中间价，取净值日 D 与前一净值日 Dp 当天的值。")
+        if fund.fx_pair.endswith("@16"):
+            fx = (f"汇率用外汇交易中心北京时间 16:00 {ccy}兑人民币参考汇率，取 D 与 Dp 当天的值。华夏基金按这个汇率估值，"
+                  "用 9:15 的中间价误差会大十倍。")
+        if sr.currency == "BRL":
+            rule = "北京时间 22:00（巴西利亚 11:00）" if fund.fx_pair.endswith("BJ22") else "伦敦 16:00（巴西利亚 12:00 或 13:00）"
+            fx = ("外汇交易中心不公布雷亚尔中间价，按基金合同以美元套算：美元兑人民币用外汇交易中心 16:00 参考汇率，"
+                  f"美元兑雷亚尔用{rule}的报价，取巴西央行同一时点的询价公告；巴西外汇休市的日子用离岸报价补。")
+        if sr.currency == "SAR":
+            fx = "汇率用外汇交易中心人民币对沙特里亚尔中间价（取倒数）。美元或港元中间价套算都对不上，二者每天差几个基点。"
+        timing = {
+            "csop": "所持 ETF 的净值由南方东英在 T 日白天公布，T 日收盘时已经可用，开盘前不一定拿得到。",
+            "lionglobal": "利安要到 D 之后第二个新加坡交易日下午才公布净值，T 日实时估算时只能沿用更早的净值，误差会比回测大。",
+            "b3": "B3 的行情文件在北京时间 T 日早上 8 点前发布，开盘前可用。",
+        }.get(sr.source, "整个过程只用 T 日开盘前已公开的数据。")
+        return [
+            first,
+            fx,
+            "用过去 20 个净值日的官方净值回归出真实敞口，吸收现金仓位、分红和跟踪误差的平均影响。上市前的净值日不参与回归。",
+            f"估算净值 = NAV(Dp) × (1 + 敞口 × 涨跌) × 汇率变动 − 年费率 {fee} 的按日计提。",
+            "溢价率 = 收盘价 / 估算净值 − 1。" + timing,
+        ]
     if fund.holdings == "reports":
         return [
             "基金没有每日申赎清单。持仓取价格日 T 之前已发布的最新一份定期报告里的基金投资明细，按发布日生效，不按报告期末。",
@@ -30,14 +91,19 @@ def method_lines(fund: FundConfig) -> list[str]:
             f"估算净值 = 前一净值日官方净值 × (1 + Σ 敞口系数 × 各部分贡献) − 年费率 {fee} 的按日计提。",
             "溢价率 = 收盘价 / 估算净值 − 1。整个过程只用 T 日开盘前已公开的数据。",
         ]
-    return [
-        "价格日 T 开盘前，深交所申赎清单 PCF(T) 给出每 100 万份对应的成分股股数，以及前两个交易日的官方净值 NAV(Dp)。",
-        "清单股数按拆股换算到复权口径。拆股当天清单把该股写成 0 股，此时沿用前一份清单。",
+    lines = [
+        "价格日 T 开盘前，深交所申赎清单 PCF(T) 给出每个申赎单位对应的成分股股数，以及前两个交易日的官方净值 NAV(Dp)。",
+        "清单股数按拆股换算到复权口径：清单给出申购替代金额时用它推算原始价格；没有时比较前后两份清单的股数，"
+        "再用未复权价核对，指数调仓造成的整数倍变化不算拆股。拆股当天清单把该股写成 0 股，此时沿用前一份清单。",
         "用 Nasdaq 收盘价算出成分篓子从 Dp 到 D 的美元收益，计入扣除 10% 预提税后的分红。",
         "用过去 20 个净值日回归出真实股票敞口，约 95% 到 98%，清单篓子本身按净值的 97.8% 到 100% 编制，二者不一致。",
         f"估算净值 = NAV(Dp) × (1 + 敞口 × 篓子收益) × 中间价变动 − 年费率 {fee} 的按日计提。",
         "溢价率 = 收盘价 / 估算净值 − 1。整个过程只用 T 日开盘前已公开的数据。",
     ]
+    if fund.pcf_fund:
+        lines[0] = (f"上交所不提供历史申赎清单。基金跟踪的指数没有免费的日线，所以借用跟踪同一指数的深市 ETF {fund.pcf_fund} "
+                    "的每日申赎清单作成分篓子，只用其中各股票的股数比例；锚定净值和回归都用本基金自己的公布净值。")
+    return lines
 
 
 # ------------------------------------------------------------------ 终端
@@ -45,12 +111,17 @@ def method_lines(fund: FundConfig) -> list[str]:
 def jisilu_note(s: dict) -> str:
     """说明公布净值口径与集思录的差异来源。"""
     beyond, mismatch = s.get("jisilu_beyond_rounding", []), set(s.get("jisilu_price_mismatch", []))
+    other = s.get("jisilu_other_nav_date", [])
+    tail = ""
+    if other:
+        tail = "；另有 " + "、".join(f"{t}（集思录用 {jd} 的净值，本表用 {d}）" for t, jd, d in other) + \
+               " 集思录沿用了更早的净值，口径不同，不参与比较"
     if not beyond:
-        return "全部在两位小数舍入以内"
+        return "全部在两位小数舍入以内" + tail
     days = "、".join(str(d) for d in beyond)
     if set(beyond) <= mismatch:
-        return f"{days} 超出舍入，当天两边的收盘价不同，其余为舍入"
-    return f"{days} 超出舍入，其余为舍入"
+        return f"{days} 超出舍入，当天两边的收盘价不同，其余为舍入" + tail
+    return f"{days} 超出舍入，其余为舍入" + tail
 
 
 def console_summary(fund: FundConfig, s: dict) -> str:
@@ -64,7 +135,7 @@ def console_summary(fund: FundConfig, s: dict) -> str:
         f"  均值 {_pct(p['mean'])}  中位数 {_pct(p['median'])}  "
         f"最高 {_pct(p['max'][1])}（{p['max'][0]}）  最低 {_pct(p['min'][1])}（{p['min'][0]}）",
         "估算精度（与公布净值比）",
-        f"  净值误差  篓子法 平均绝对 {ne['mae']:.2f}bp  均方根 {ne['rms']:.2f}bp  最大 {ne['max']:.2f}bp  "
+        f"  净值误差  {method_label(fund)} 平均绝对 {ne['mae']:.2f}bp  均方根 {ne['rms']:.2f}bp  最大 {ne['max']:.2f}bp  "
         + "  ".join(f"{k}bp 内 {v:.0%}" for k, v in s["nav_within_bp"].items()),
         *([f"            指数法 平均绝对 {ni['mae']:.2f}bp  均方根 {ni['rms']:.2f}bp  最大 {ni['max']:.2f}bp"] if ni else []),
         f"  溢价率误差 平均绝对 {pe['mae']:.3f}pp  最大 {pe['max']:.3f}pp  "
@@ -75,7 +146,7 @@ def console_summary(fund: FundConfig, s: dict) -> str:
         lines += [
             f"与集思录历史表对照（{s['jisilu_days']} 天）",
             f"  公布净值口径 vs 集思录  最大差 {jo['max']:.3f}pp，{jisilu_note(s)}",
-            f"  篓子估算     vs 集思录  平均绝对 {je['mae']:.3f}pp  最大 {je['max']:.3f}pp",
+            f"  {method_label(fund)}估算 vs 集思录  平均绝对 {je['mae']:.3f}pp  最大 {je['max']:.3f}pp",
         ]
     lines.append("月度溢价率（均值 / 最低 / 最高）")
     for m, v in s["monthly"].items():
@@ -84,6 +155,15 @@ def console_summary(fund: FundConfig, s: dict) -> str:
 
 
 # ------------------------------------------------------------------ CSV
+
+def csv_columns(label: str) -> list:
+    """逐日明细的列。label 为主估算方法的简称，例如“篓子法”“指数法”。"""
+    cols = [(name.replace("篓子法", label).replace("篓子估算", label.removesuffix("法") + "估算")
+             .replace("篓子收益", label.removesuffix("法") + "涨跌"), fn) for name, fn in CSV_COLUMNS]
+    if label != "篓子法":
+        cols = [("境外收盘日" if name == "持仓日期" else name, fn) for name, fn in cols]
+    return cols
+
 
 CSV_COLUMNS = [
     ("日期", lambda r: r.date.isoformat()),
@@ -99,7 +179,7 @@ CSV_COLUMNS = [
     ("溢价率_指数估算_%", lambda r: _f(r.premium_est_index and r.premium_est_index * 100, 4)),
     ("溢价率差_估算减公布_pp", lambda r: _f(r.premium_err_pp, 4)),
     ("集思录溢价率_%", lambda r: _f(r.jisilu_premium and r.jisilu_premium * 100, 2)),
-    ("长假补算美股天数", lambda r: str(r.gap_sessions)),
+    ("长假补算境外交易日", lambda r: str(r.gap_sessions)),
     ("开盘公允价值", lambda r: _f(r.fair_value, 6)),
     ("溢价率_公允价值_%", lambda r: _f(r.premium_fv * 100, 4)),
     ("有效敞口", lambda r: _f(r.exposure, 4)),
@@ -110,12 +190,13 @@ CSV_COLUMNS = [
 ]
 
 
-def write_csv(rows: list[Row], path: Path) -> None:
-    table = [[fn(r) for _, fn in CSV_COLUMNS] for r in rows]
-    keep = [i for i in range(len(CSV_COLUMNS)) if any(row[i] for row in table)]  # 去掉整列为空的列（如无指数）
+def write_csv(rows: list[Row], path: Path, label: str = "篓子法") -> None:
+    cols = csv_columns(label)
+    table = [[fn(r) for _, fn in cols] for r in rows]
+    keep = [i for i in range(len(cols)) if any(row[i] for row in table)]  # 去掉整列为空的列（如无指数）
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow([CSV_COLUMNS[i][0] for i in keep])
+        w.writerow([cols[i][0] for i in keep])
         for row in table:
             w.writerow([row[i] for i in keep])
 
@@ -148,9 +229,9 @@ def write_markdown(fund: FundConfig, rows: list[Row], s: dict, est: Estimator, p
         "",
         "| 方法 | 平均偏差 | 平均绝对误差 | 均方根 | 最大 |",
         "|---|---|---|---|---|",
-        f"| 净值，篓子法 | {ne['mean']:+.2f}bp | {ne['mae']:.2f}bp | {ne['rms']:.2f}bp | {ne['max']:.2f}bp |",
+        f"| 净值，{method_label(fund)} | {ne['mean']:+.2f}bp | {ne['mae']:.2f}bp | {ne['rms']:.2f}bp | {ne['max']:.2f}bp |",
         *([f"| 净值，指数法（对照） | {ni['mean']:+.2f}bp | {ni['mae']:.2f}bp | {ni['rms']:.2f}bp | {ni['max']:.2f}bp |"] if ni else []),
-        f"| 溢价率，篓子法 | {pe['mean']:+.4f}pp | {pe['mae']:.4f}pp | {pe['rms']:.4f}pp | {pe['max']:.4f}pp |",
+        f"| 溢价率，{method_label(fund)} | {pe['mean']:+.4f}pp | {pe['mae']:.4f}pp | {pe['rms']:.4f}pp | {pe['max']:.4f}pp |",
         "",
         "净值误差落在 1、2、5 个基点以内的比例："
         + "、".join(f"{v:.0%}" for v in s["nav_within_bp"].values())
@@ -163,7 +244,7 @@ def write_markdown(fund: FundConfig, rows: list[Row], s: dict, est: Estimator, p
         jo, je = s["jisilu_vs_official_pp"], s["jisilu_vs_est_pp"]
         out += [
             f"与集思录历史表重叠 {s['jisilu_days']} 天。用公布净值算出的溢价率与集思录最大相差 {jo['max']:.3f} 个百分点，"
-            f"{jisilu_note(s)}。用篓子估算净值算出的溢价率与集思录平均相差 {je['mae']:.3f} 个百分点，最大 {je['max']:.3f}。",
+            f"{jisilu_note(s)}。用{method_label(fund)}估算净值算出的溢价率与集思录平均相差 {je['mae']:.3f} 个百分点，最大 {je['max']:.3f}。",
             "",
         ]
     out += [
@@ -182,10 +263,10 @@ def write_markdown(fund: FundConfig, rows: list[Row], s: dict, est: Estimator, p
             "",
             "## 长假后的首个交易日",
             "",
-            "这些日子参考净值之后美股又交易了几天，按集思录口径算出的溢价率偏离真实水平。"
+            "这些日子参考净值之后境外市场又交易了几天，按集思录口径算出的溢价率偏离真实水平。"
             "“开盘公允价值”把这几天的海外涨跌和当天中间价补进来。",
             "",
-            "| 日期 | 补算美股天数 | 集思录口径溢价率 | 公允价值溢价率 | 集思录历史表 |",
+            "| 日期 | 补算境外交易日 | 集思录口径溢价率 | 公允价值溢价率 | 集思录历史表 |",
             "|---|---|---|---|---|",
         ]
         js_dates = [r.date for r in rows if r.jisilu_premium is not None]
@@ -561,15 +642,14 @@ def write_html(fund: FundConfig, rows: list[Row], s: dict, path: Path) -> None:
         for r in rows
     ]
     method = method_lines(fund)
-    basket = "持仓篓子" if fund.holdings == "reports" else "成分篓子"
+    basket = {"reports": "持仓篓子", "index": "持仓ETF" if is_feeder(fund) else "指数"}.get(fund.holdings, "成分篓子")
+    how = {
+        "reports": "净值由定期报告披露的持仓价格独立估算",
+        "index": ("净值由所持境外 ETF 的价格独立估算" if is_feeder(fund) else "净值由跟踪指数与汇率独立估算"),
+    }.get(fund.holdings, "净值由申赎清单成分股价格独立估算")
     html = (
         _HTML.replace("__TITLE__", f"{fund.fund_id} {fund.name} 溢价率")
-        .replace(
-            "__SUBTITLE__",
-            f"{s['first']} 至 {s['last']}，{s['days']} 个交易日。"
-            + ("净值由定期报告披露的持仓价格独立估算" if fund.holdings == "reports" else "净值由申赎清单成分股价格独立估算")
-            + "，并与基金公布净值逐日核对。",
-        )
+        .replace("__SUBTITLE__", f"{s['first']} 至 {s['last']}，{s['days']} 个交易日。{how}，并与基金公布净值逐日核对。")
         .replace("__BASKET__", basket)
         .replace("__METHOD__", "".join(f"<li>{m}</li>" for m in method))
         .replace("__DATA__", json.dumps(data, ensure_ascii=False))
@@ -583,7 +663,37 @@ def write_all(fund: FundConfig, rows: list[Row], s: dict, est: Estimator, out_di
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{fund.fund_id}_premium_{rows[0].date}_{rows[-1].date}"
     csv_path, md_path, html_path = (out_dir / f"{stem}.{ext}" for ext in ("csv", "md", "html"))
-    write_csv(rows, csv_path)
+    write_csv(rows, csv_path, method_label(fund))
     write_markdown(fund, rows, s, est, md_path, csv_path.name)
     write_html(fund, rows, s, html_path)
     return [csv_path, md_path, html_path]
+
+
+# ------------------------------------------------------------------ 多只基金汇总
+
+def write_overview(results: list[tuple[FundConfig, dict]], out_dir: Path) -> list[Path]:
+    """每只基金一行：区间、方法、溢价率统计、估算精度、与集思录的对照。"""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    head = ["基金", "名称", "方法", "区间", "交易日", "已公布净值", "溢价率均值", "中位数", "最高", "最低", "最新",
+            "净值误差平均绝对bp", "均方根bp", "最大bp", "溢价率误差平均绝对pp", "集思录重叠天数", "公布净值口径与集思录最大差pp", "超出舍入的日子"]
+    table = []
+    for fund, s in results:
+        p, ne, pe, jo = s["premium"], s["nav_err_bp"], s["premium_err_pp"], s["jisilu_vs_official_pp"]
+        latest_d, latest_v, latest_is_est = p["latest"]
+        table.append([
+            fund.fund_id, fund.name, method_label(fund), f"{s['first']}~{s['last']}", str(s["days"]), str(s["days_with_official"]),
+            _pct(p["mean"]), _pct(p["median"]), f"{_pct(p['max'][1])}（{p['max'][0]}）", f"{_pct(p['min'][1])}（{p['min'][0]}）",
+            f"{_pct(latest_v)}（{latest_d}{'，估算' if latest_is_est else ''}）",
+            _f(ne.get("mae"), 2), _f(ne.get("rms"), 2), _f(ne.get("max"), 1), _f(pe.get("mae"), 3),
+            str(s["jisilu_days"]), _f(jo.get("max"), 3) if jo else "", "、".join(str(d) for d in s["jisilu_beyond_rounding"]),
+        ])
+    csv_path, md_path = out_dir / "overview.csv", out_dir / "overview.md"
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(head)
+        w.writerows(table)
+    md = ["# 全部基金汇总", "", "| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    md += ["| " + " | ".join(row) + " |" for row in table]
+    md_path.write_text("\n".join(md) + "\n", encoding="utf-8")
+    return [csv_path, md_path]

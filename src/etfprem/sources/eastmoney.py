@@ -40,6 +40,44 @@ def parse_nav(rows: list[dict]) -> dict[date, float]:
     return dict(sorted(out.items()))
 
 
+KLINE = (
+    "https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3"
+    "&fields2=f51,f53&klt=101&fqt=0&beg={start}&end={end}"
+)
+
+
+def download_kline(secid: str, start: date, end: date) -> dict[date, float]:
+    """东方财富行情日线收盘价，用于海外指数（例如德国 DAX 100.GDAXI）。
+
+    注意 100.NDX 实为纳斯达克综合指数，纳斯达克 100 用 Nasdaq 官方导出。该接口连续请求过快会断开，调用方需要间隔。
+    """
+    raw = fetch(KLINE.format(secid=secid, start=start.strftime("%Y%m%d"), end=end.strftime("%Y%m%d")),
+                headers={"Referer": "https://quote.eastmoney.com/"})
+    lines = ((json.loads(raw).get("data") or {}).get("klines")) or []
+    out = {}
+    for line in lines:
+        d, c = line.split(",")[:2]
+        out[date.fromisoformat(d)] = float(c)
+    return dict(sorted(out.items()))
+
+
+KLINE_BARS = (
+    "https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3"
+    "&fields2=f51,f52,f53,f54,f55&klt=101&fqt=0&beg={start}&end={end}"
+)
+
+
+def download_kline_bars(secid: str, start: date, end: date) -> dict[date, dict[str, float]]:
+    """日线开高低收。外汇（119.USDBRL）日线在北京时间 05:00 切日：开盘约为前一日纽约 17:00，收盘约为当日纽约 17:00。"""
+    raw = fetch(KLINE_BARS.format(secid=secid, start=start.strftime("%Y%m%d"), end=end.strftime("%Y%m%d")),
+                headers={"Referer": "https://quote.eastmoney.com/"})
+    out = {}
+    for line in ((json.loads(raw).get("data") or {}).get("klines")) or []:
+        d, o, c, h, lo = line.split(",")[:5]
+        out[date.fromisoformat(d)] = {"open": float(o), "close": float(c), "high": float(h), "low": float(lo)}
+    return dict(sorted(out.items()))
+
+
 PINGZHONG = "https://fund.eastmoney.com/pingzhongdata/{code}.js"
 
 
